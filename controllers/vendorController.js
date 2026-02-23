@@ -1,3 +1,6 @@
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const db = require("../db");
 const emailService = require("../utils/emailService");
 
 // Register Vendor
@@ -26,12 +29,14 @@ exports.registerVendor = async (req, res) => {
       [business_name, owner_name, email, phone, location, hashedPassword, "pending"],
       async (err, result) => {
         if (err) {
-          console.error(err);
+          console.error("❌ Vendor Registration Error:", err);
           if (err.code === "ER_DUP_ENTRY") {
             return res.status(400).json({ message: "Email already registered" });
           }
-          return res.status(500).json({ message: "Database error" });
+          return res.status(500).json({ message: "Database error: " + err.message });
         }
+
+        console.log("✅ Vendor record created. Generating OTP...");
 
         // 2. Store OTP
         const sqlOTP = `
@@ -44,6 +49,7 @@ exports.registerVendor = async (req, res) => {
             console.error("❌ Error storing OTP:", err);
           }
 
+          console.log("📧 Sending OTP email to:", email);
           // 3. Send Email
           try {
             await emailService.sendOTP(email, otp);
@@ -148,3 +154,4 @@ exports.getVendorOrders = (req, res) => {
     });
   });
 };
+
