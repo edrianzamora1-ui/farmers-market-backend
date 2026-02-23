@@ -70,31 +70,30 @@ app.post("/verify", (req, res) => {
       if (err) console.error("❌ Error updating verification status:", err);
     });
 
-    // 4. Activate User (Check both tables)
-    // Try farmers table first
-    db.query("UPDATE farmers SET status = 'active' WHERE email = ?", [email], (err, resultF) => {
-      if (err) console.error(err);
+    // 4. Activate User (Update both tables to handle users with both roles)
+    const updateFarmer = new Promise((resolve) => {
+      db.query("UPDATE farmers SET status = 'active' WHERE email = ?", [email], (err, result) => {
+        if (err) console.error("❌ Error activating farmer:", err);
+        resolve(result && result.affectedRows > 0);
+      });
+    });
 
-      if (resultF && resultF.affectedRows > 0) {
+    const updateVendor = new Promise((resolve) => {
+      db.query("UPDATE vendors SET status = 'active' WHERE email = ?", [email], (err, result) => {
+        if (err) console.error("❌ Error activating vendor:", err);
+        resolve(result && result.affectedRows > 0);
+      });
+    });
+
+    Promise.all([updateFarmer, updateVendor]).then(([isFarmer, isVendor]) => {
+      if (isFarmer || isVendor) {
         return res.status(200).json({
-          message: "Farmer account verified and activated successfully!",
+          message: `Account verified and activated successfully! (${isFarmer ? 'Farmer' : ''}${isFarmer && isVendor ? ' & ' : ''}${isVendor ? 'Vendor' : ''})`,
           verified: true
         });
-      }
-
-      // If not in farmers, try vendors
-      db.query("UPDATE vendors SET status = 'active' WHERE email = ?", [email], (err, resultV) => {
-        if (err) console.error(err);
-
-        if (resultV && resultV.affectedRows > 0) {
-          return res.status(200).json({
-            message: "Vendor account verified and activated successfully!",
-            verified: true
-          });
-        }
-
+      } else {
         res.status(404).json({ message: "User account not found for activation" });
-      });
+      }
     });
   });
 });
