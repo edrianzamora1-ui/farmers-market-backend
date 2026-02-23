@@ -34,9 +34,6 @@ app.get("/", (req, res) => {
   res.send("🚜 Farmers Market API Running");
 });
 
-/* ===============================
-   OTP VERIFICATION ROUTE
-================================ */
 app.post("/verify", (req, res) => {
   const { email, otp } = req.body;
 
@@ -44,16 +41,61 @@ app.post("/verify", (req, res) => {
     return res.status(400).json({ message: "Email and OTP are required" });
   }
 
-  // Simple validation: accept any 6-digit OTP
-  if (otp.length !== 6 || isNaN(otp)) {
-    return res.status(400).json({ message: "OTP must be 6 digits" });
-  }
+  // 1. Check OTP in database
+  const sqlCheck = `
+    SELECT * FROM otp_verifications 
+    WHERE email = ? AND otp = ? AND verified = FALSE
+    ORDER BY created_at DESC LIMIT 1
+  `;
 
-  // In a real app, validate OTP from email service or database
-  // For now, accept any valid 6-digit OTP
-  res.status(200).json({
-    message: "OTP verified successfully",
-    verified: true
+  db.query(sqlCheck, [email, otp], (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Database error" });
+    }
+
+    if (results.length === 0) {
+      return res.status(400).json({ message: "Invalid or already used OTP" });
+    }
+
+    const verification = results[0];
+
+    // 2. Check Expiration
+    if (new Date() > new Date(verification.expires_at)) {
+      return res.status(400).json({ message: "OTP has expired" });
+    }
+
+    // 3. Mark OTP as verified
+    db.query("UPDATE otp_verifications SET verified = TRUE WHERE id = ?", [verification.id], (err) => {
+      if (err) console.error("❌ Error updating verification status:", err);
+    });
+
+    // 4. Activate User (Check both tables)
+    // Try farmers table first
+    db.query("UPDATE farmers SET status = 'active' WHERE email = ?", [email], (err, resultF) => {
+      if (err) console.error(err);
+
+      if (resultF && resultF.affectedRows > 0) {
+        return res.status(200).json({
+          message: "Farmer account verified and activated successfully!",
+          verified: true
+        });
+      }
+
+      // If not in farmers, try vendors
+      db.query("UPDATE vendors SET status = 'active' WHERE email = ?", [email], (err, resultV) => {
+        if (err) console.error(err);
+
+        if (resultV && resultV.affectedRows > 0) {
+          return res.status(200).json({
+            message: "Vendor account verified and activated successfully!",
+            verified: true
+          });
+        }
+
+        res.status(404).json({ message: "User account not found for activation" });
+      });
+    });
   });
 });
 

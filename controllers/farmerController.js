@@ -1,7 +1,4 @@
-// Resolved merge and force-saved by assistant on 2026-02-24
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
-const db = require("../db");
+const emailService = require("../utils/emailService");
 
 // Register Farmer
 exports.registerFarmer = async (req, res) => {
@@ -14,24 +11,56 @@ exports.registerFarmer = async (req, res) => {
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const sql = `
+    // 1. Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+
+    const sqlFarmer = `
       INSERT INTO farmers
       (full_name, email, phone, location, password, status)
       VALUES (?, ?, ?, ?, ?, ?)
     `;
 
     db.query(
-      sql,
-      [full_name, email, phone, location, hashedPassword, "active"],
-      (err, result) => {
+      sqlFarmer,
+      [full_name, email, phone, location, hashedPassword, "pending"],
+      async (err, result) => {
         if (err) {
           console.error(err);
+          if (err.code === "ER_DUP_ENTRY") {
+            return res.status(400).json({ message: "Email already registered" });
+          }
           return res.status(500).json({ message: "Database error" });
         }
 
-        res.status(201).json({
-          message: "Farmer registered successfully",
-          farmerId: result.insertId
+        // 2. Store OTP
+        const sqlOTP = `
+          INSERT INTO otp_verifications (email, otp, expires_at)
+          VALUES (?, ?, ?)
+        `;
+
+        db.query(sqlOTP, [email, otp, expiresAt], async (err) => {
+          if (err) {
+            console.error("❌ Error storing OTP:", err);
+            // Even if OTP storage fails, user is created. They might need to resend OTP.
+          }
+
+          // 3. Send Email
+          try {
+            await emailService.sendOTP(email, otp);
+            res.status(201).json({
+              message: "Farmer registered successfully. Please verify your email.",
+              farmerId: result.insertId,
+              email: email
+            });
+          } catch (emailErr) {
+            console.error("❌ Email sending failed:", emailErr);
+            res.status(201).json({
+              message: "Farmer registered, but email failed to send. Please contact support or try resending.",
+              farmerId: result.insertId,
+              email: email
+            });
+          }
         });
       }
     );
@@ -60,6 +89,14 @@ exports.loginFarmer = (req, res) => {
       }
 
       const farmer = results[0];
+
+      // Check account status
+      if (farmer.status !== "active") {
+        return res.status(403).json({
+          message: "Account not verified. Please check your email for the OTP.",
+          verified: false
+        });
+      }
 
       const isMatch = await bcrypt.compare(password, farmer.password);
       if (!isMatch) {

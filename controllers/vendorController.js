@@ -1,6 +1,4 @@
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
-const db = require("../db");
+const emailService = require("../utils/emailService");
 
 // Register Vendor
 exports.registerVendor = async (req, res) => {
@@ -13,24 +11,55 @@ exports.registerVendor = async (req, res) => {
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const sql = `
+    // 1. Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+
+    const sqlVendor = `
       INSERT INTO vendors
       (business_name, owner_name, email, phone, location, password, status)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `;
 
     db.query(
-      sql,
-      [business_name, owner_name, email, phone, location, hashedPassword, "active"],
-      (err, result) => {
+      sqlVendor,
+      [business_name, owner_name, email, phone, location, hashedPassword, "pending"],
+      async (err, result) => {
         if (err) {
           console.error(err);
+          if (err.code === "ER_DUP_ENTRY") {
+            return res.status(400).json({ message: "Email already registered" });
+          }
           return res.status(500).json({ message: "Database error" });
         }
 
-        res.status(201).json({
-          message: "Vendor registered successfully",
-          vendorId: result.insertId
+        // 2. Store OTP
+        const sqlOTP = `
+          INSERT INTO otp_verifications (email, otp, expires_at)
+          VALUES (?, ?, ?)
+        `;
+
+        db.query(sqlOTP, [email, otp, expiresAt], async (err) => {
+          if (err) {
+            console.error("❌ Error storing OTP:", err);
+          }
+
+          // 3. Send Email
+          try {
+            await emailService.sendOTP(email, otp);
+            res.status(201).json({
+              message: "Vendor registered successfully. Please verify your email.",
+              vendorId: result.insertId,
+              email: email
+            });
+          } catch (emailErr) {
+            console.error("❌ Email sending failed:", emailErr);
+            res.status(201).json({
+              message: "Vendor registered, but email failed to send.",
+              vendorId: result.insertId,
+              email: email
+            });
+          }
         });
       }
     );
@@ -61,6 +90,14 @@ exports.loginVendor = (req, res) => {
     }
 
     const vendor = results[0];
+
+    // Check account status
+    if (vendor.status !== "active") {
+      return res.status(403).json({
+        message: "Account not verified. Please check your email for the OTP.",
+        verified: false
+      });
+    }
 
     const isMatch = await bcrypt.compare(password, vendor.password);
 
