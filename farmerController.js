@@ -29,12 +29,14 @@ exports.registerFarmer = async (req, res) => {
       [full_name, email, phone, location, hashedPassword, "pending"],
       async (err, result) => {
         if (err) {
-          console.error(err);
+          console.error("❌ Farmer Registration Error:", err);
           if (err.code === "ER_DUP_ENTRY") {
             return res.status(400).json({ message: "Email already registered" });
           }
-          return res.status(500).json({ message: "Database error" });
+          return res.status(500).json({ message: "Database error: " + err.message });
         }
+
+        console.log("✅ Farmer record created. Generating OTP...");
 
         // 2. Store OTP
         const sqlOTP = `
@@ -45,9 +47,9 @@ exports.registerFarmer = async (req, res) => {
         db.query(sqlOTP, [email, otp, expiresAt], async (err) => {
           if (err) {
             console.error("❌ Error storing OTP:", err);
-            // Even if OTP storage fails, user is created. They might need to resend OTP.
           }
 
+          console.log("📧 Sending OTP email to:", email);
           // 3. Send Email
           try {
             await emailService.sendOTP(email, otp);
@@ -59,7 +61,7 @@ exports.registerFarmer = async (req, res) => {
           } catch (emailErr) {
             console.error("❌ Email sending failed:", emailErr);
             res.status(201).json({
-              message: "Farmer registered, but email failed to send. Please contact support or try resending.",
+              message: "Farmer registered, but email failed to send.",
               farmerId: result.insertId,
               email: email
             });
