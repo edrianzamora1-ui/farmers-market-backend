@@ -1,0 +1,201 @@
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const db = require("../db");
+const emailService = require("../utils/emailService");
+
+// Register Farmer
+exports.registerFarmer = async (req, res) => {
+  const { full_name, email, phone, location, password } = req.body;
+
+  if (!full_name || !email || !phone || !location || !password) {
+    return res.status(400).json({ message: "All fields are required" });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // 1. Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+
+    const sqlFarmer = `
+      INSERT INTO farmers
+      (full_name, email, phone, location, password, status)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
+
+    db.query(
+      sqlFarmer,
+      [full_name, email, phone, location, hashedPassword, "pending"],
+      async (err, result) => {
+        if (err) {
+          console.error(err);
+          if (err.code === "ER_DUP_ENTRY") {
+            return res.status(400).json({ message: "Email already registered" });
+          }
+          return res.status(500).json({ message: "Database error" });
+        }
+
+        // 2. Store OTP
+        const sqlOTP = `
+          INSERT INTO otp_verifications (email, otp, expires_at)
+          VALUES (?, ?, ?)
+        `;
+
+        db.query(sqlOTP, [email, otp, expiresAt], async (err) => {
+          if (err) {
+            console.error("❌ Error storing OTP:", err);
+            // Even if OTP storage fails, user is created. They might need to resend OTP.
+          }
+
+          // 3. Send Email
+          try {
+            await emailService.sendOTP(email, otp);
+            res.status(201).json({
+              message: "Farmer registered successfully. Please verify your email.",
+              farmerId: result.insertId,
+              email: email
+            });
+          } catch (emailErr) {
+            console.error("❌ Email sending failed:", emailErr);
+            res.status(201).json({
+              message: "Farmer registered, but email failed to send. Please contact support or try resending.",
+              farmerId: result.insertId,
+              email: email
+            });
+          }
+        });
+      }
+    );
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// Login Farmer
+exports.loginFarmer = (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: "Email and password required" });
+  }
+
+  db.query(
+    "SELECT * FROM farmers WHERE email = ?",
+    [email],
+    async (err, results) => {
+      if (err) return res.status(500).json({ message: "Database error" });
+
+      if (results.length === 0) {
+        return res.status(400).json({ message: "Farmer not found" });
+      }
+
+      const farmer = results[0];
+
+      // Check account status
+      if (farmer.status !== "active") {
+        return res.status(403).json({
+          message: "Account not verified. Please check your email for the OTP.",
+          verified: false
+        });
+      }
+
+      const isMatch = await bcrypt.compare(password, farmer.password);
+      if (!isMatch) {
+        return res.status(400).json({ message: "Invalid credentials" });
+      }
+
+      const token = jwt.sign(
+        { id: farmer.id, role: "farmer" },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" }
+      );
+
+      res.status(200).json({
+        message: "Login successful",
+        token
+      });
+    }
+  );
+};
+
+// Get Orders for Farmer (orders for their products)
+exports.getFarmerOrders = (req, res) => {
+  const farmerId = req.user.id;
+
+  const sql = `
+    SELECT 
+      orders.id,
+      orders.quantity,
+      orders.total_price,
+      orders.created_at,
+      products.product_name,
+      products.price
+    FROM orders
+    JOIN products ON orders.product_id = products.id
+    WHERE products.farmer_id = ?
+    ORDER BY orders.created_at DESC
+  `;
+
+  db.query(sql, [farmerId], (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Database error" });
+    }
+
+    res.json({
+      message: "Farmer order history retrieved",
+      orders: results
+    });
+  });
+};
+
+// Get Farmer Revenue
+exports.getFarmerRevenue = (req, res) => {
+  const farmerId = req.user.id;
+
+  const sql = `
+    SELECT 
+      SUM(orders.total_price) as total_revenue,
+      COUNT(orders.id) as total_orders,
+      SUM(orders.quantity) as total_units_sold
+    FROM orders
+    JOIN products ON orders.product_id = products.id
+    WHERE products.farmer_id = ?
+  `;
+
+  db.query(sql, [farmerId], (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Database error" });
+    }
+
+    const revenue = results[0];
+    res.json({
+      message: "Farmer revenue retrieved",
+      total_revenue: revenue.total_revenue || 0,
+      total_orders: revenue.total_orders || 0,
+      total_units_sold: revenue.total_units_sold || 0
+    });
+  });
+};
+
+// Get All Farmers (public)
+exports.getAllFarmers = (req, res) => {
+  const sql = `
+    SELECT id, full_name, email, phone, location, status, created_at
+    FROM farmers
+    WHERE status = 'active'
+    ORDER BY full_name
+  `;
+
+  db.query(sql, (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Database error" });
+    }
+
+    res.json(results);
+  });
+};
